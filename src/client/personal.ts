@@ -1,5 +1,7 @@
 import type { ClientInfo, ExchangeRate, StatementItem } from '../types/monobank.js';
+import { dedup } from '../cache/dedup.js';
 import { apiFetch } from './base.js';
+import { withRetry } from './retry.js';
 
 export class PersonalClient {
   constructor(private readonly token: string) {}
@@ -9,9 +11,13 @@ export class PersonalClient {
   }
 
   async getClientInfo(): Promise<ClientInfo> {
-    return apiFetch<ClientInfo>('/personal/client-info', {
-      headers: this.headers(),
-    });
+    return dedup('client-info', () =>
+      withRetry(() =>
+        apiFetch<ClientInfo>('/personal/client-info', {
+          headers: this.headers(),
+        }),
+      ),
+    );
   }
 
   async getStatement(
@@ -22,18 +28,26 @@ export class PersonalClient {
     const path = to
       ? `/personal/statement/${accountId}/${from}/${to}`
       : `/personal/statement/${accountId}/${from}`;
-    return apiFetch<StatementItem[]>(path, { headers: this.headers() });
+    return dedup(`statement:${path}`, () =>
+      withRetry(() =>
+        apiFetch<StatementItem[]>(path, { headers: this.headers() }),
+      ),
+    );
   }
 
   async setWebhook(url: string): Promise<void> {
-    await apiFetch<void>('/personal/webhook', {
-      method: 'POST',
-      headers: this.headers(),
-      body: { webHookUrl: url },
-    });
+    await withRetry(() =>
+      apiFetch<void>('/personal/webhook', {
+        method: 'POST',
+        headers: this.headers(),
+        body: { webHookUrl: url },
+      }),
+    );
   }
 
   async getExchangeRates(): Promise<ExchangeRate[]> {
-    return apiFetch<ExchangeRate[]>('/bank/currency');
+    return dedup('exchange-rates', () =>
+      withRetry(() => apiFetch<ExchangeRate[]>('/bank/currency')),
+    );
   }
 }
