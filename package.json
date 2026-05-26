@@ -4,7 +4,7 @@
   "description": "MCP server for Monobank Open API — accounts, statements, exchange rates, jars, webhooks",
   "type": "module",
   "bin": {
-    "monobank-mcp": "./dist/index.js"
+    "monobank-mcp": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
