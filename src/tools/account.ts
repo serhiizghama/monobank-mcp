@@ -44,7 +44,7 @@ export function registerAccountTools(
 function formatClientInfo(info: ClientInfo): string {
   const formatted = {
     name: info.name,
-    accounts: info.accounts.map((a) => ({
+    accounts: (info.accounts ?? []).map((a) => ({
       id: a.id,
       iban: a.iban,
       type: a.type,
@@ -53,7 +53,7 @@ function formatClientInfo(info: ClientInfo): string {
       creditLimit: a.creditLimit > 0 ? formatAmount(a.creditLimit) : undefined,
       cashback: a.cashbackType,
     })),
-    jars: info.jars.map((j) => ({
+    jars: (info.jars ?? []).map((j) => ({
       id: j.id,
       title: j.title,
       balance: formatAmount(j.balance),

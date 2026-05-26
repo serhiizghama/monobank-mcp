@@ -31,7 +31,7 @@ export function registerJarTools(
           cache.set(cacheKey, info, 59);
         }
 
-        if (info.jars.length === 0) {
+        if (!info.jars || info.jars.length === 0) {
           return { content: [{ type: 'text' as const, text: 'No savings jars found.' }] };
         }
 

@@ -4,7 +4,7 @@ export interface ClientInfo {
   webHookUrl: string;
   permissions: string;
   accounts: Account[];
-  jars: Jar[];
+  jars?: Jar[];
 }
 
 export interface Account {
