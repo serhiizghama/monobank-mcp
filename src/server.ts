@@ -20,7 +20,7 @@ export function createServer(): McpServer {
   const mode = (process.env.MONOBANK_AUTH_MODE ?? 'personal') as AuthMode;
 
   const server = new McpServer(
-    { name: 'monobank-mcp', version: '2.0.1' },
+    { name: 'monobank-mcp', version: '2.0.2' },
     {
       capabilities: {
         logging: {},
