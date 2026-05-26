@@ -13,7 +13,7 @@
   <a href="https://www.npmjs.com/package/monobank-mcp"><img src="https://img.shields.io/npm/v/monobank-mcp" alt="npm version" /></a>
   <a href="https://github.com/serhiizghama/monobank-mcp"><img src="https://img.shields.io/github/stars/serhiizghama/monobank-mcp?style=flat" alt="GitHub stars" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
-  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js&logoColor=white" alt="Node.js" /></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen?logo=node.js&logoColor=white" alt="Node.js" /></a>
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" alt="TypeScript" /></a>
   <a href="https://modelcontextprotocol.io"><img src="https://badge.mcpx.dev?type=server&features=tools,resources,prompts" alt="MCP" /></a>
 </p>
