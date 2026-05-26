@@ -2,6 +2,8 @@
 
 MCP server for [Monobank Open API](https://api.monobank.ua/) — access bank accounts, transaction history, exchange rates, savings jars, and webhook management from Claude and other LLM clients.
 
+Supports both **Personal API** (token-based) and **Corporate API** (ECDSA signing, zero rate limits).
+
 ## Quick Start
 
 ```bash
@@ -28,7 +30,11 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
+For Corporate API setup, see [docs/CORPORATE_API.md](docs/CORPORATE_API.md).
+
 ## Tools
+
+### Personal API (8 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -40,6 +46,15 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `set_webhook` | Register a URL to receive real-time transaction events |
 | `delete_webhook` | Stop receiving webhook notifications |
 | `get_webhook_status` | Check currently registered webhook URL |
+
+### Corporate API (4 additional tools)
+
+| Tool | Description |
+|------|-------------|
+| `initiate_authorization` | Start user auth flow, returns Monobank app URL |
+| `check_authorization` | Check if user approved the auth request |
+| `get_corp_settings` | Get corporate app settings (key, name, webhook) |
+| `set_corp_webhook` | Set webhook URL for the corporate application |
 
 ## Resources
 
@@ -55,7 +70,9 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 
 ## Rate Limits
 
-Monobank personal API allows **1 request per 60 seconds** for `client-info` and `statement` endpoints. This server automatically caches responses for 59 seconds to stay within limits. Exchange rates are cached for 5 minutes (Monobank updates them every ~5 min).
+Monobank **personal API** allows 1 request per 60 seconds for `client-info` and `statement` endpoints. This server automatically caches responses for 59 seconds to stay within limits. Exchange rates are cached for 5 minutes.
+
+**Corporate API** has no rate limits.
 
 Retry with exponential backoff is built in for transient failures.
 
@@ -63,7 +80,11 @@ Retry with exponential backoff is built in for transient failures.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `MONOBANK_TOKEN` | Yes | Personal API token from https://api.monobank.ua/ |
+| `MONOBANK_TOKEN` | Personal mode | Personal API token from https://api.monobank.ua/ |
+| `MONOBANK_AUTH_MODE` | No | `personal` (default) or `corporate` |
+| `MONOBANK_KEY_ID` | Corporate mode | SHA1 hash of your public key |
+| `MONOBANK_PRIVATE_KEY_PATH` | Corporate mode | Path to ECDSA private key file |
+| `MONOBANK_PRIVATE_KEY_PEM` | Corporate mode | PEM string (alternative to file path) |
 
 ## Docker
 

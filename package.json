@@ -1,6 +1,6 @@
 {
   "name": "monobank-mcp",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "MCP server for Monobank Open API — accounts, statements, exchange rates, jars, webhooks",
   "type": "module",
   "bin": {
