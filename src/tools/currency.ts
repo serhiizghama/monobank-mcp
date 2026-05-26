@@ -15,7 +15,7 @@ export function registerCurrencyTools(
     {
       title: 'Get Exchange Rates',
       description:
-        'Get current Monobank exchange rates (UAH/USD/EUR and 100+ other pairs). Public endpoint, no auth required. Cached for 5 minutes.',
+        'Get current Monobank exchange rates for UAH and 100+ currency pairs. Public endpoint, no auth required, cached for 5 minutes. Use for currency conversion or checking current rates. Note: Monobank provides only current rates, not historical. Returns array of currency pairs with buy rate, sell rate (or cross rate for non-major pairs), and last updated timestamp.',
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,

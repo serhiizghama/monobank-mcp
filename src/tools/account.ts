@@ -14,12 +14,12 @@ export function registerAccountTools(
     {
       title: 'Get Client Info',
       description:
-        'Get client profile, all bank accounts and savings jars. Includes balances, IBANs, and account types. Results are cached for 59 seconds.',
+        'Get client profile with all bank accounts and savings jars. Call this first to discover available account IDs for use with other tools. Rate-limited: 1 request per 60 seconds in Personal mode, cached automatically. Returns client name, list of accounts (id, IBAN, type, currency, balance, credit limit, cashback type) and savings jars (id, title, balance, goal, progress).',
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async () => {

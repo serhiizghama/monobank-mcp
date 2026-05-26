@@ -12,12 +12,12 @@ export function registerCorporateSettingsTools(
     {
       title: 'Get Corporate Settings',
       description:
-        '[Corporate API only] Get corporate application settings including registered public key, app name, permissions, and webhook URL.',
+        '[Corporate API only] Retrieve the corporate application configuration registered with Monobank. Use to verify app setup, check the active webhook URL, or confirm which permissions were granted. Returns: pubkey (SHA1 hash), app name, permission flags (s=statements, p=personal info), logo URL, and current webhook URL.',
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async () => {
@@ -37,16 +37,16 @@ export function registerCorporateSettingsTools(
     {
       title: 'Set Corporate Webhook',
       description:
-        '[Corporate API only] Set or update the webhook URL for the corporate application.',
+        '[Corporate API only] Register or replace the webhook URL for the corporate application. Monobank will POST authorization results and transaction events to this URL. Use during initial app setup or when your server URL changes. Replaces any existing webhook. The URL must be publicly accessible HTTPS with a CA-issued certificate that returns HTTP 200 within 5 seconds. Returns confirmation after successful registration.',
       inputSchema: {
         url: z.string().url()
-          .describe('Publicly accessible HTTPS URL to receive events'),
+          .describe('Publicly accessible HTTPS URL to receive authorization and transaction events'),
       },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async ({ url }) => {

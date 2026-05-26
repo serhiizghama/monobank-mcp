@@ -12,7 +12,7 @@ export function registerCorporateAuthTools(
     {
       title: 'Initiate Authorization',
       description:
-        '[Corporate API only] Start the user authorization flow. Returns a URL the user must open in their Monobank app to approve access. Poll check_authorization with the returned requestId to confirm approval.',
+        '[Corporate API only] Start the user authorization flow. Returns an acceptUrl the user must open in their Monobank app and a tokenRequestId for polling status. After calling this, show the user the acceptUrl and poll check_authorization every 3-5 seconds with the tokenRequestId. The callback_url receives a POST with the auth token once the user approves.',
       inputSchema: {
         callback_url: z.string().url()
           .describe('Publicly accessible HTTPS URL where Monobank will POST the authorization result'),
@@ -23,7 +23,7 @@ export function registerCorporateAuthTools(
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async ({ callback_url, permissions }) => {
@@ -46,7 +46,7 @@ export function registerCorporateAuthTools(
     {
       title: 'Check Authorization',
       description:
-        '[Corporate API only] Check if a user has approved the authorization request.',
+        '[Corporate API only] Check if a user has approved the authorization request from initiate_authorization. Poll every 3-5 seconds after showing the user the Monobank app URL. Stop polling when status is approved (store the token) or rejected. Do not poll more frequently than every 3 seconds. Returns status: waiting (user has not acted yet), approved (token is ready), or rejected (user declined).',
       inputSchema: {
         request_id: z.string()
           .describe('The tokenRequestId returned by initiate_authorization'),
@@ -55,7 +55,7 @@ export function registerCorporateAuthTools(
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async ({ request_id }) => {

@@ -15,7 +15,7 @@ export function registerWebhookTools(
     {
       title: 'Set Webhook',
       description:
-        'Register a webhook URL with Monobank. Monobank will POST real-time transaction events to this URL. The URL must be publicly accessible HTTPS and respond with HTTP 200 within 5 seconds.',
+        'Register or replace the webhook URL for real-time transaction notifications. Only one webhook can be active at a time — calling this replaces any existing URL. The URL must be publicly accessible HTTPS with a CA-issued certificate and respond with HTTP 200 within 5 seconds. After registration, Monobank will POST a StatementItem JSON payload on every transaction. Returns confirmation of registration.',
       inputSchema: {
         url: z
           .string()
@@ -49,12 +49,13 @@ export function registerWebhookTools(
     'delete_webhook',
     {
       title: 'Delete Webhook',
-      description: 'Unregister the current webhook. Monobank will stop sending transaction notifications.',
+      description:
+        'Disable the currently registered webhook, stopping all real-time transaction notifications. Use when decommissioning the integration or before switching to a new URL via set_webhook. Do not call if you only want to change the URL — call set_webhook directly instead (it replaces the existing URL). Returns confirmation. Has no effect if no webhook was registered.',
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async () => {
@@ -72,7 +73,8 @@ export function registerWebhookTools(
     'get_webhook_status',
     {
       title: 'Get Webhook Status',
-      description: 'Check the currently registered webhook URL for your account.',
+      description:
+        'Check the currently registered webhook URL for your Monobank account. Use to verify whether a webhook is active before calling set_webhook or delete_webhook. Results come from the cached client-info (59s TTL). Returns the active webhook URL, or a message indicating no webhook is registered.',
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,

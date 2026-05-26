@@ -14,12 +14,12 @@ export function registerJarTools(
     {
       title: 'Get Jars',
       description:
-        'Get all savings jars (копилки) with current balances and goals.',
+        'Get all savings jars with current balances and progress toward goals. Available in Personal API only — not supported in Corporate mode. Use to check savings progress or display jar balances. Data is fetched from the same cached client-info call (59s TTL). Returns list of jars with id, title, balance, goal amount, progress percentage, and currency.',
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async () => {

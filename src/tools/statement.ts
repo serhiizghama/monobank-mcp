@@ -17,7 +17,7 @@ export function registerStatementTools(
     {
       title: 'Get Statement',
       description:
-        'Get transaction history for a date range (max 31 days). Cached for 59 seconds.',
+        'Get full transaction history for a specific date range (max 31 days). Use when you need transactions for a specific period. For recent activity use get_recent_transactions instead. Rate-limited: 1 request per 60 seconds in Personal mode. Returns list of transactions with time (ISO 8601), description, amount, balance, MCC code, hold status, and optional comment.',
       inputSchema: {
         account_id: z
           .string()
@@ -44,7 +44,7 @@ export function registerStatementTools(
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async ({ account_id, from_date, to_date, limit }) => {
@@ -97,7 +97,7 @@ export function registerStatementTools(
     {
       title: 'Get Recent Transactions',
       description:
-        'Get the most recent transactions from an account. Use this to check for new activity, monitor spending, or find a specific payment.',
+        'Get the most recent transactions from an account going back N minutes. Use to check for new activity, monitor spending, or find a specific recent payment. Do not use for historical analysis over specific date ranges — use get_statement instead. Returns up to N most recent transactions with time, description, amount, balance, and MCC code.',
       inputSchema: {
         account_id: z.string().optional().default('0')
           .describe("Account ID. Use '0' for default card. Get IDs via get_client_info"),
@@ -110,7 +110,7 @@ export function registerStatementTools(
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async ({ account_id, minutes, limit }) => {
