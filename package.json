@@ -1,0 +1,40 @@
+{
+  "name": "monobank-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Monobank Open API — accounts, statements, exchange rates",
+  "type": "module",
+  "bin": {
+    "monobank-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "mcp",
+    "monobank",
+    "banking",
+    "ukraine",
+    "llm",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  }
+}
