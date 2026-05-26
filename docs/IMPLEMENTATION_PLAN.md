@@ -33,13 +33,15 @@ monobank-mcp/
 │   ├── client/
 │   │   ├── personal.ts           # PersonalClient (X-Token auth)
 │   │   ├── corporate.ts          # CorporateClient (ECDSA auth)
+│   │   ├── signing.ts            # ECDSA request signing logic
 │   │   └── base.ts               # Shared HTTP logic, error handling
 │   ├── tools/
-│   │   ├── account.ts            # get_client_info, get_account_list
+│   │   ├── account.ts            # get_client_info
 │   │   ├── statement.ts          # get_statement, get_recent_transactions
 │   │   ├── currency.ts           # get_exchange_rates
 │   │   ├── webhook.ts            # set_webhook, delete_webhook, get_webhook_status
-│   │   └── corporate-auth.ts     # initiate_authorization, check_authorization
+│   │   ├── corporate-auth.ts     # initiate_authorization, check_authorization
+│   │   └── corporate-settings.ts # get_corp_settings, set_corp_webhook
 │   ├── cache/
 │   │   └── ttl-cache.ts          # In-memory TTL cache
 │   ├── types/
@@ -87,9 +89,12 @@ MONOBANK_LOG_LEVEL=info      # "debug" | "info" | "warn" | "error"
 | Endpoint | Personal API | Corporate API |
 |----------|-------------|---------------|
 | `/personal/client-info` | 1 req / 60s | unlimited |
-| `/personal/statement` | 1 req / 60s | unlimited |
+| `/personal/statement/{account}/{from}/{to}` | 1 req / 60s | unlimited |
 | `/bank/currency` | no limit | no limit |
-| `/personal/webhook` | no documented limit | no documented limit |
+| `/personal/webhook` | no documented limit | N/A (use `/personal/corp/webhook`) |
+| `/personal/auth/request` | N/A | no documented limit |
+| `/personal/corp/settings` | N/A | no documented limit |
+| `/personal/corp/webhook` | N/A | no documented limit |
 
 **Caching strategy:** TTL cache keyed by `endpoint + args`. Default TTL = 59s (just under the 60s limit). Cache is per-process (in-memory Map).
 
@@ -183,7 +188,7 @@ export interface Account {
   sendId: string;
   balance: number;          // in kopiykas (1 UAH = 100 kopiykas)
   creditLimit: number;
-  type: 'black' | 'white' | 'platinum' | 'iron' | 'fop' | 'yellow' | 'eAid';
+  type: 'black' | 'white' | 'platinum' | 'iron' | 'fop' | 'yellow' | 'eAid' | string;
   currencyCode: number;     // ISO 4217 numeric
   cashbackType: 'None' | 'UAH' | 'Miles';
   maskedPan: string[];
@@ -294,30 +299,39 @@ const BASE_URL = 'https://api.monobank.ua';
 
 export async function apiFetch<T>(
   path: string,
-  options: { headers?: Record<string, string>; method?: string } = {}
+  options: {
+    headers?: Record<string, string>;
+    method?: string;
+    body?: Record<string, unknown>;
+  } = {}
 ): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
     method: options.method ?? 'GET',
     headers: { 'Content-Type': 'application/json', ...options.headers },
+    body: options.body ? JSON.stringify(options.body) : undefined,
   });
 
   if (response.ok) {
-    return response.json() as Promise<T>;
+    const text = await response.text();
+    return text ? (JSON.parse(text) as T) : (undefined as T);
   }
 
   // Translate HTTP errors to domain errors
   if (response.status === 401) throw new AuthError();
+  if (response.status === 403) throw new AuthError('Access denied. Token may lack required permissions.');
 
   if (response.status === 429) {
     const retryAfter = parseInt(response.headers.get('Retry-After') ?? '60', 10);
     throw new RateLimitError(retryAfter);
   }
 
-  const body = await response.text().catch(() => '');
-  const message = body || `HTTP ${response.status}`;
+  const errorBody = await response.text().catch(() => '');
+  const message = errorBody || `HTTP ${response.status}`;
   throw new MonobankError('server', message, undefined, response.status);
 }
 ```
+
+> **Note:** Monobank returns empty body on some successful POST requests (e.g., webhook). Using `response.text()` + conditional parse avoids `JSON.parse("")` errors. Also handle 403 — Monobank returns it for permission issues distinct from 401 auth errors.
 
 ---
 
@@ -327,28 +341,33 @@ export async function apiFetch<T>(
 export class PersonalClient {
   constructor(private readonly token: string) {}
 
+  private headers(): Record<string, string> {
+    return { 'X-Token': this.token };
+  }
+
   async getClientInfo(): Promise<ClientInfo> {
     return apiFetch<ClientInfo>('/personal/client-info', {
-      headers: { 'X-Token': this.token },
+      headers: this.headers(),
     });
   }
 
   async getStatement(
     accountId: string,
     from: number,
-    to: number
+    to?: number
   ): Promise<StatementItem[]> {
-    return apiFetch<StatementItem[]>(
-      `/personal/statement/${accountId}/${from}/${to}`,
-      { headers: { 'X-Token': this.token } }
-    );
+    // `to` is optional — Monobank defaults to current time if omitted
+    const path = to
+      ? `/personal/statement/${accountId}/${from}/${to}`
+      : `/personal/statement/${accountId}/${from}`;
+    return apiFetch<StatementItem[]>(path, { headers: this.headers() });
   }
 
   async setWebhook(url: string): Promise<void> {
     await apiFetch<void>('/personal/webhook', {
       method: 'POST',
-      headers: { 'X-Token': this.token },
-      // body handled in base client — extend apiFetch to accept body
+      headers: this.headers(),
+      body: { webHookUrl: url },
     });
   }
 
@@ -357,6 +376,8 @@ export class PersonalClient {
   }
 }
 ```
+
+> **Note:** The `to` parameter in `getStatement` is optional per Monobank docs — if omitted, the API defaults to the current timestamp. The `setWebhook` body must be `{ "webHookUrl": "<url>" }`. Passing an empty string (`""`) unregisters the webhook.
 
 ---
 
@@ -395,17 +416,27 @@ export class TtlCache {
 
 ### Step 1.7 — MCP Tools
 
+> **Tool registration:** Use `server.registerTool()` (the config-object API), not the legacy `server.tool()` which is frozen as of protocol version 2025-03-26. `registerTool` supports `title`, `outputSchema`, `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), and `structuredContent` in responses.
+>
+> **`inputSchema` format:** Pass a **raw Zod shape** (plain object of Zod types), NOT wrapped in `z.object()`. The SDK wraps it internally. Example: `inputSchema: { name: z.string() }` — NOT `inputSchema: z.object({ name: z.string() })`.
+>
+> **Logging:** NEVER use `console.log()` in an MCP stdio server — it writes to stdout and corrupts the JSON-RPC stream. Use `server.sendLoggingMessage({ level: 'info', logger: 'monobank', data: '...' })` for structured logging, or `console.error()` for debug output.
+
 #### `src/tools/account.ts`
 
 ```typescript
-// Tool: get_client_info
-// Returns client profile with all accounts and jars.
-// Cached for 59 seconds to respect the 60s rate limit.
-
-server.tool(
+server.registerTool(
   'get_client_info',
-  'Get client profile, all bank accounts and savings jars. Includes balances, IBANs, and account types. Results are cached for 59 seconds.',
-  {},
+  {
+    title: 'Get Client Info',
+    description: 'Get client profile, all bank accounts and savings jars. Includes balances, IBANs, and account types. Results are cached for 59 seconds.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
   async () => {
     const cacheKey = 'client-info';
     const cached = cache.get<ClientInfo>(cacheKey);
@@ -414,7 +445,6 @@ server.tool(
     const info = await client.getClientInfo();
     cache.set(cacheKey, info, 59);
 
-    // Format output for readability
     const formatted = {
       name: info.name,
       accounts: info.accounts.map(a => ({
@@ -443,52 +473,89 @@ server.tool(
 #### `src/tools/statement.ts`
 
 ```typescript
-// Tool: get_statement
-// Input schema with Zod — validates date range, enforces 31-day limit
-
-const StatementSchema = z.object({
-  account_id: z
-    .string()
-    .optional()
-    .default('0')
-    .describe("Account ID from get_client_info. Use '0' for the default (black) card"),
-  from_date: z
-    .string()
-    .describe("Start date in ISO 8601 format (e.g. '2024-01-01') or Unix timestamp"),
-  to_date: z
-    .string()
-    .optional()
-    .describe("End date in ISO 8601 format. Defaults to now. Max range: 31 days"),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(500)
-    .optional()
-    .default(50)
-    .describe('Maximum number of transactions to return (default: 50, max: 500)'),
-});
+server.registerTool(
+  'get_statement',
+  {
+    title: 'Get Statement',
+    description: 'Get transaction history for a date range (max 31 days). Cached for 59 seconds.',
+    inputSchema: {
+      account_id: z
+        .string()
+        .optional()
+        .default('0')
+        .describe("Account ID from get_client_info. Use '0' for the default (black) card"),
+      from_date: z
+        .string()
+        .describe("Start date in ISO 8601 format (e.g. '2024-01-01') or Unix timestamp"),
+      to_date: z
+        .string()
+        .optional()
+        .describe("End date in ISO 8601 format. Defaults to now. Max range: 31 days"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .optional()
+        .default(50)
+        .describe('Maximum number of transactions to return (default: 50, max: 500)'),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async ({ account_id, from_date, to_date, limit }) => {
+    // ... handler
+  }
+);
 ```
 
 #### `src/tools/currency.ts`
 
 ```typescript
-// Tool: get_exchange_rates
-// Public endpoint, no auth required, cached for 5 minutes (Monobank updates every 5 min)
+server.registerTool(
+  'get_exchange_rates',
+  {
+    title: 'Get Exchange Rates',
+    description: 'Get current Monobank exchange rates (UAH/USD/EUR and 100+ other pairs). Public endpoint, no auth required. Cached for 5 minutes.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async () => {
+    // ... handler
+  }
+);
 ```
 
 ---
 
 ### Step 1.8 — Server Entry (`src/index.ts` and `src/server.ts`)
 
+> **CRITICAL (stdio transport):** NEVER use `console.log()` — it writes to stdout and corrupts the JSON-RPC stream. Use `console.error()` for debug output, or `server.sendLoggingMessage()` for structured logging to the client.
+
 ```typescript
 // src/index.ts
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.js';
 
-const transport = new StdioServerTransport();
-const server = await createServer();
-await server.connect(transport);
+async function main() {
+  const transport = new StdioServerTransport();
+  const server = await createServer();
+  await server.connect(transport);
+  console.error('Monobank MCP server running on stdio');
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error);
+  process.exit(1);
+});
 
 // src/server.ts
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -497,10 +564,19 @@ export async function createServer(): Promise<McpServer> {
   const token = process.env.MONOBANK_TOKEN;
   if (!token) throw new Error('MONOBANK_TOKEN environment variable is required');
 
-  const server = new McpServer({
-    name: 'monobank-mcp',
-    version: '0.1.0',
-  });
+  const server = new McpServer(
+    { name: 'monobank-mcp', version: '0.1.0' },
+    {
+      capabilities: {
+        logging: {},
+      },
+      instructions:
+        'Monobank personal banking MCP server. Provides access to Ukrainian bank account balances, ' +
+        'transaction history (statements), currency exchange rates, savings jars, and webhook management. ' +
+        'Rate limit: 1 request per 60 seconds for personal API endpoints (client-info, statement). ' +
+        'Results are cached automatically. Use get_client_info first to discover available accounts.',
+    }
+  );
 
   // Register all tools (imported from tools/)
   // ...
@@ -508,6 +584,8 @@ export async function createServer(): Promise<McpServer> {
   return server;
 }
 ```
+
+> **`instructions` field:** This is a new feature in MCP SDK — free-text instructions surfaced to the LLM. Use it to describe the server, its limitations (rate limits), and recommended tool calling order. This replaces the need for overly verbose tool descriptions.
 
 ---
 
@@ -773,14 +851,23 @@ Expose three tools that manage webhook registration at Monobank. These are simpl
 
 **Tool: `set_webhook`**
 ```typescript
-server.tool(
+server.registerTool(
   'set_webhook',
-  'Register a webhook URL with Monobank. Monobank will POST real-time transaction events to this URL. The URL must be publicly accessible and respond with HTTP 200 within 5 seconds.',
   {
-    url: z
-      .string()
-      .url()
-      .describe('Publicly accessible HTTPS URL to receive transaction events. Must return HTTP 200 within 5 seconds.'),
+    title: 'Set Webhook',
+    description: 'Register a webhook URL with Monobank. Monobank will POST real-time transaction events to this URL. The URL must be publicly accessible and respond with HTTP 200 within 5 seconds.',
+    inputSchema: {
+      url: z
+        .string()
+        .url()
+        .describe('Publicly accessible HTTPS URL to receive transaction events.'),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ url }) => {
     await client.setWebhook(url);
@@ -796,12 +883,19 @@ server.tool(
 
 **Tool: `delete_webhook`**
 ```typescript
-server.tool(
+server.registerTool(
   'delete_webhook',
-  'Unregister the current webhook. Monobank will stop sending transaction notifications.',
-  {},
+  {
+    title: 'Delete Webhook',
+    description: 'Unregister the current webhook. Monobank will stop sending transaction notifications.',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
   async () => {
-    // POST /personal/webhook with empty string unregisters
     await client.setWebhook('');
     return { content: [{ type: 'text', text: 'Webhook unregistered.' }] };
   }
@@ -810,10 +904,18 @@ server.tool(
 
 **Tool: `get_webhook_status`**
 ```typescript
-server.tool(
+server.registerTool(
   'get_webhook_status',
-  'Check the currently registered webhook URL for your account.',
-  {},
+  {
+    title: 'Get Webhook Status',
+    description: 'Check the currently registered webhook URL for your account.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
   async () => {
     const info = await client.getClientInfo();
     const url = info.webHookUrl;
@@ -848,16 +950,25 @@ server.tool(
 This is the practical alternative to real-time webhooks for agent use cases.
 
 ```typescript
-server.tool(
+server.registerTool(
   'get_recent_transactions',
-  'Get the most recent transactions from an account. Use this to check for new activity, monitor spending, or find a specific payment. For Corporate API (no rate limits), this can be polled frequently.',
   {
-    account_id: z.string().optional().default('0')
-      .describe("Account ID. Use '0' for default card. Get IDs via get_client_info"),
-    minutes: z.number().int().min(1).max(43200).optional().default(60)
-      .describe('How many minutes back to look (default: 60, max: 43200 = 30 days)'),
-    limit: z.number().int().min(1).max(100).optional().default(20)
-      .describe('Max transactions to return (default: 20)'),
+    title: 'Get Recent Transactions',
+    description: 'Get the most recent transactions from an account. Use this to check for new activity, monitor spending, or find a specific payment.',
+    inputSchema: {
+      account_id: z.string().optional().default('0')
+        .describe("Account ID. Use '0' for default card. Get IDs via get_client_info"),
+      minutes: z.number().int().min(1).max(43200).optional().default(60)
+        .describe('How many minutes back to look (default: 60, max: 43200 = 30 days)'),
+      limit: z.number().int().min(1).max(100).optional().default(20)
+        .describe('Max transactions to return (default: 20)'),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
   },
   async ({ account_id, minutes, limit }) => {
     const to = Math.floor(Date.now() / 1000);
@@ -895,12 +1006,20 @@ server.tool(
 
 **Tool: `get_jars`**
 ```typescript
-server.tool(
+server.registerTool(
   'get_jars',
-  'Get all savings jars (копилки) with current balances and goals.',
-  {},
+  {
+    title: 'Get Jars',
+    description: 'Get all savings jars (копилки) with current balances and goals.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
   async () => {
-    const info = await client.getClientInfo(); // already cached
+    const info = await client.getClientInfo();
     const jars = info.jars.map(j => ({
       id: j.id,
       title: j.title,
@@ -917,9 +1036,71 @@ server.tool(
 
 ---
 
-### Step 3.4 — Update README for v0.3.0
+### Step 3.4 — Resource: Exchange Rates (`src/server.ts`)
 
-Full tools table:
+Resources are ideal for relatively static reference data. Exchange rates update every 5 minutes — a good fit.
+
+```typescript
+import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+
+server.registerResource(
+  'exchange-rates',
+  'monobank://exchange-rates',
+  {
+    description: 'Current Monobank exchange rates for all currency pairs',
+    mimeType: 'application/json',
+  },
+  async (uri) => {
+    const rates = await client.getExchangeRates();
+    return {
+      contents: [{
+        uri: uri.href,
+        mimeType: 'application/json',
+        text: JSON.stringify(rates, null, 2),
+      }],
+    };
+  }
+);
+```
+
+> **When to use Resources vs Tools:** Resources are "application-driven" — the host app loads them as context. Tools are "model-driven" — the LLM calls them during reasoning. Use resources for reference data the LLM might need as background (currency codes, exchange rates). Use tools for actions and queries with parameters.
+
+---
+
+### Step 3.5 — Prompt: Spending Analysis (`src/server.ts`)
+
+Prompts are user-controlled templates exposed as slash commands in the client.
+
+```typescript
+server.registerPrompt(
+  'spending-analysis',
+  {
+    title: 'Analyze Spending',
+    description: 'Analyze spending patterns for a given time period',
+    argsSchema: {
+      period: z.enum(['week', 'month', 'quarter']).describe('Time period to analyze'),
+      account_id: z.string().optional().describe('Specific account ID (optional, defaults to main card)'),
+    },
+  },
+  async ({ period, account_id }) => ({
+    messages: [{
+      role: 'user',
+      content: {
+        type: 'text',
+        text: `Analyze my spending for the last ${period}. ${
+          account_id ? `Focus on account ${account_id}.` : 'Use the default card.'
+        } Steps:\n1. Use get_statement to fetch transactions for the period\n2. Categorize transactions by MCC code\n3. Calculate totals per category\n4. Identify the largest expenses\n5. Note any unusual spending patterns`,
+      },
+    }],
+  })
+);
+```
+
+---
+
+### Step 3.6 — Update README for v0.3.0
+
+Full tools table (Personal API):
 
 | Tool | Description |
 |------|-------------|
@@ -932,6 +1113,27 @@ Full tools table:
 | `delete_webhook` | Stop receiving webhook notifications |
 | `get_webhook_status` | Check currently registered webhook URL |
 
+Resources:
+
+| Resource | URI | Description |
+|----------|-----|-------------|
+| `exchange-rates` | `monobank://exchange-rates` | Current exchange rates (reference data) |
+
+Prompts:
+
+| Prompt | Description |
+|--------|-------------|
+| `spending-analysis` | Analyze spending patterns for a given period |
+
+Additional tools in Corporate mode (Phase 4):
+
+| Tool | Description |
+|------|-------------|
+| `initiate_authorization` | Start user auth flow, returns Monobank app URL |
+| `check_authorization` | Check if user approved the auth request |
+| `get_corp_settings` | Get corporate app settings (key, name, webhook) |
+| `set_corp_webhook` | Set webhook URL for the corporate application |
+
 ---
 
 ### Phase 3 Checklist
@@ -939,12 +1141,14 @@ Full tools table:
 - [ ] `src/tools/webhook.ts` — set_webhook, delete_webhook, get_webhook_status
 - [ ] `src/tools/jars.ts` — get_jars
 - [ ] `src/tools/statement.ts` — add get_recent_transactions
+- [ ] Resource: `exchange-rates` (monobank://exchange-rates)
+- [ ] Prompt: `spending-analysis`
 - [ ] `tests/tools/webhook.test.ts` — 4 tests
-- [ ] README tools table updated
+- [ ] README tools/resources/prompts tables updated
 - [ ] `npm run build` passes
 - [ ] `npm publish` — v0.3.0
 - [ ] Update Glama listing
-- [ ] git commit: `feat: webhook management, get_recent_transactions, jar tools`
+- [ ] git commit: `feat: webhook management, get_recent_transactions, jar tools, resources, prompts`
 - [ ] Tag: `git tag v0.3.0`
 
 ---
@@ -979,23 +1183,42 @@ Expected response: 2 days – 4 weeks. You will receive a `KEY_ID` (SHA1 hash of
 
 ### Step 4.1 — ECDSA Signing (`src/client/signing.ts`)
 
+> **CRITICAL:** Monobank's corporate signature format is `SHA256(timestamp + secondIngredient + requestPath)`, where `secondIngredient` **varies by endpoint**. This is the most common source of bugs in corporate API integrations.
+
+**Signature formula:** `Sign_ECDSA_SHA256( "{timestamp}{secondIngredient}{requestPath}" )`
+
+| Endpoint | `secondIngredient` |
+|----------|-------------------|
+| `POST /personal/auth/request` | permissions string (e.g., `"sp"`) |
+| `GET /personal/auth/request` (check status) | `requestId` (the `tokenRequestId` from initiation) |
+| `GET /personal/client-info` | `requestId` (user's token from auth flow) |
+| `GET /personal/statement/...` | `requestId` (user's token from auth flow) |
+| `GET /personal/corp/settings` | empty string `""` |
+| `POST /personal/corp/webhook` | empty string `""` |
+
 ```typescript
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 export interface SigningConfig {
   keyId: string;
-  privateKeyPem: string;    // PEM string (from file or env var)
+  privateKeyPem: string;
 }
 
+/**
+ * @param secondIngredient — varies by endpoint (see table above):
+ *   - For per-user endpoints: the requestId / user token
+ *   - For auth initiation: the permissions string (e.g., "sp")
+ *   - For corp-level endpoints: empty string ""
+ */
 export function signRequest(
   config: SigningConfig,
-  requestPath: string
+  requestPath: string,
+  secondIngredient: string = ''
 ): Record<string, string> {
   const timestamp = Math.floor(Date.now() / 1000);
 
-  // Monobank signature: timestamp + keyId + path (no body, no query params)
-  const dataToSign = `${timestamp}${config.keyId}${requestPath}`;
+  const dataToSign = `${timestamp}${secondIngredient}${requestPath}`;
 
   const signer = createSign('SHA256');
   signer.update(dataToSign);
@@ -1009,7 +1232,6 @@ export function signRequest(
 }
 
 export function loadPrivateKey(): string {
-  // Priority: env var (for Docker/cloud) > file path
   if (process.env.MONOBANK_PRIVATE_KEY_PEM) {
     return process.env.MONOBANK_PRIVATE_KEY_PEM.replace(/\\n/g, '\n');
   }
@@ -1021,12 +1243,15 @@ export function loadPrivateKey(): string {
 
 **Critical gotchas:**
 1. `X-Time` must be within ±5 seconds of Monobank server time — ensure system clock is synced (NTP)
-2. The path in signature is the URL path only — no query parameters, no request body
+2. The `requestPath` in signature is the URL path only — no query parameters, no request body
 3. secp256k1 curve — not the common P-256. Node.js `crypto` supports it natively via `createSign('SHA256')` with a secp256k1 key
+4. **The `secondIngredient` is NOT the `keyId`** — this is a widespread misconception. It depends on the endpoint (see table above)
 
 ---
 
 ### Step 4.2 — Corporate Client (`src/client/corporate.ts`)
+
+> **Key insight:** Per-user endpoints (`client-info`, `statement`) require a `requestId` (user token obtained via the auth flow). Corp-level endpoints (`corp/settings`, `corp/webhook`) and the auth initiation endpoint do not.
 
 ```typescript
 export class CorporateClient {
@@ -1036,91 +1261,175 @@ export class CorporateClient {
     this.signingConfig = { keyId, privateKeyPem };
   }
 
-  private headers(path: string): Record<string, string> {
+  /**
+   * Build headers for per-user endpoints.
+   * secondIngredient = requestId (user's token from auth flow)
+   */
+  private userHeaders(path: string, requestId: string): Record<string, string> {
     return {
-      'Content-Type': 'application/json',
-      ...signRequest(this.signingConfig, path),
+      ...signRequest(this.signingConfig, path, requestId),
+      'X-Request-Id': requestId,
     };
   }
 
-  // Same interface as PersonalClient — drop-in replacement
-  async getClientInfo(): Promise<ClientInfo> {
+  /**
+   * Build headers for corp-level endpoints (no user context).
+   * secondIngredient = "" (empty string)
+   */
+  private corpHeaders(path: string): Record<string, string> {
+    return signRequest(this.signingConfig, path, '');
+  }
+
+  // --- Per-user endpoints (require requestId from auth flow) ---
+
+  async getClientInfo(requestId: string): Promise<ClientInfo> {
     const path = '/personal/client-info';
-    return apiFetch<ClientInfo>(path, { headers: this.headers(path) });
+    return apiFetch<ClientInfo>(path, { headers: this.userHeaders(path, requestId) });
   }
 
-  async getStatement(accountId: string, from: number, to: number): Promise<StatementItem[]> {
-    const path = `/personal/statement/${accountId}/${from}/${to}`;
-    return apiFetch<StatementItem[]>(path, { headers: this.headers(path) });
+  async getStatement(
+    requestId: string,
+    accountId: string,
+    from: number,
+    to?: number
+  ): Promise<StatementItem[]> {
+    const path = to
+      ? `/personal/statement/${accountId}/${from}/${to}`
+      : `/personal/statement/${accountId}/${from}`;
+    return apiFetch<StatementItem[]>(path, { headers: this.userHeaders(path, requestId) });
   }
 
-  // Corporate-specific: initiate user authorization
+  // --- Auth flow endpoints ---
+
   async initiateAuthorization(
-    redirectUrl: string,
-    webhookUrl: string,
-    permissions: string = 'a'  // 'a' = all
+    callbackUrl: string,
+    permissions: string = 'sp'  // 's' = statements, 'p' = personal info
   ): Promise<{ tokenRequestId: string; acceptUrl: string }> {
     const path = '/personal/auth/request';
+    // secondIngredient for auth initiation = permissions string
+    const sigHeaders = signRequest(this.signingConfig, path, permissions);
     return apiFetch(path, {
       method: 'POST',
-      headers: this.headers(path),
-      // body: { redirectUrl, webhookUrl, permissions }
+      headers: {
+        ...sigHeaders,
+        'X-Callback': callbackUrl,       // webhook URL — sent as HEADER, not body
+        'X-Permissions': permissions,     // permission flags — sent as HEADER, not body
+      },
     });
   }
 
-  async checkAuthorization(requestId: string): Promise<{ status: 'waiting' | 'approved' | 'rejected' }> {
-    const path = `/personal/auth/${requestId}`;
-    return apiFetch(path, { headers: this.headers(path) });
+  async checkAuthorization(
+    requestId: string
+  ): Promise<{ status: string }> {
+    // IMPORTANT: path is /personal/auth/request (NOT /personal/auth/{requestId})
+    // The requestId is passed via X-Request-Id header
+    const path = '/personal/auth/request';
+    // secondIngredient for auth check = requestId
+    const sigHeaders = signRequest(this.signingConfig, path, requestId);
+    return apiFetch(path, {
+      headers: {
+        ...sigHeaders,
+        'X-Request-Id': requestId,
+      },
+    });
+  }
+
+  // --- Corp-level endpoints (no user context) ---
+
+  async getCorpSettings(): Promise<{
+    pubkey: string;
+    name: string;
+    permission: string;
+    logo: string;
+    webhook: string | null;
+  }> {
+    const path = '/personal/corp/settings';
+    return apiFetch(path, { headers: this.corpHeaders(path) });
+  }
+
+  async setCorpWebhook(url: string): Promise<void> {
+    const path = '/personal/corp/webhook';
+    await apiFetch<void>(path, {
+      method: 'POST',
+      headers: this.corpHeaders(path),
+      body: { webHookUrl: url },
+    });
+  }
+
+  async getExchangeRates(): Promise<ExchangeRate[]> {
+    return apiFetch<ExchangeRate[]>('/bank/currency');
   }
 }
 ```
+
+> **Important differences from PersonalClient:**
+> - `getClientInfo` and `getStatement` require a `requestId` parameter (the user's auth token)
+> - Auth initiation sends `X-Callback` and `X-Permissions` as **headers**, not in the body
+> - `checkAuthorization` hits `GET /personal/auth/request` with `X-Request-Id` header — **NOT** `/personal/auth/{requestId}` as a path param
+> - Corp-level endpoints (`corp/settings`, `corp/webhook`) use empty string as signing ingredient
 
 ---
 
 ### Step 4.3 — Auth Mode Detection (`src/server.ts` update)
 
 ```typescript
-function createClient(): PersonalClient | CorporateClient {
-  const mode = process.env.MONOBANK_AUTH_MODE ?? 'personal';
+type AuthMode = 'personal' | 'corporate';
+
+interface AppContext {
+  mode: AuthMode;
+  personalClient?: PersonalClient;
+  corporateClient?: CorporateClient;
+}
+
+function createContext(): AppContext {
+  const mode = (process.env.MONOBANK_AUTH_MODE ?? 'personal') as AuthMode;
 
   if (mode === 'corporate') {
     const keyId = process.env.MONOBANK_KEY_ID;
     if (!keyId) throw new Error('MONOBANK_KEY_ID is required for corporate mode');
     const privateKeyPem = loadPrivateKey();
-    return new CorporateClient(keyId, privateKeyPem);
+    return { mode, corporateClient: new CorporateClient(keyId, privateKeyPem) };
   }
 
   const token = process.env.MONOBANK_TOKEN;
   if (!token) throw new Error('MONOBANK_TOKEN is required for personal mode');
-  return new PersonalClient(token);
+  return { mode, personalClient: new PersonalClient(token) };
 }
 ```
 
-Both clients implement the same interface — all tools work identically regardless of auth mode. Corporate mode simply has no rate limits.
+> **Note:** Unlike the PersonalClient which is stateless (token in header), the CorporateClient has **different method signatures** — per-user methods require a `requestId`. These clients do NOT share a common interface. The server registers different tool sets depending on the mode. In personal mode, tools call `personalClient.getClientInfo()`. In corporate mode, tools need a `requestId` parameter and call `corporateClient.getClientInfo(requestId)`.
 
 ---
 
-### Step 4.4 — Corporate-Specific MCP Tools
+### Step 4.4 — Corporate-Specific MCP Tools (`src/tools/corporate-auth.ts`)
+
+Only registered when `mode === 'corporate'`.
 
 #### Tool: `initiate_authorization`
 
-Only available in Corporate mode. Starts the OAuth-like flow where an end-user authorizes your app.
+Starts the OAuth-like flow where an end-user authorizes your corporate app.
 
 ```typescript
-server.tool(
+server.registerTool(
   'initiate_authorization',
-  '[Corporate API only] Start the user authorization flow. Returns a URL the user must open in their Monobank app to approve access. Poll check_authorization with the returned requestId to confirm approval.',
   {
-    redirect_url: z.string().url()
-      .describe('URL to redirect the user to after approval'),
-    webhook_url: z.string().url().optional()
-      .describe('URL where Monobank will POST the authorization token after approval'),
+    title: 'Initiate Authorization',
+    description: '[Corporate API only] Start the user authorization flow. Returns a URL the user must open in their Monobank app to approve access. Poll check_authorization with the returned requestId to confirm approval.',
+    inputSchema: {
+      callback_url: z.string().url()
+        .describe('Publicly accessible HTTPS URL where Monobank will POST the authorization result'),
+      permissions: z.string().optional().default('sp')
+        .describe("Permission flags: 's' = statements, 'p' = personal info. Default: 'sp' (both)"),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
-  async ({ redirect_url, webhook_url }) => {
-    const result = await (client as CorporateClient).initiateAuthorization(
-      redirect_url,
-      webhook_url ?? redirect_url
-    );
+  async ({ callback_url, permissions }) => {
+    const result = await corporateClient.initiateAuthorization(callback_url, permissions);
     return {
       content: [{
         type: 'text',
@@ -1131,22 +1440,93 @@ server.tool(
 );
 ```
 
+> **Note:** `callback_url` and `permissions` are sent as **HTTP headers** (`X-Callback`, `X-Permissions`), not in the request body. The CorporateClient handles this internally.
+
 #### Tool: `check_authorization`
 
 ```typescript
-server.tool(
+server.registerTool(
   'check_authorization',
-  '[Corporate API only] Check if a user has approved the authorization request.',
   {
-    request_id: z.string()
-      .describe('The tokenRequestId returned by initiate_authorization'),
+    title: 'Check Authorization',
+    description: '[Corporate API only] Check if a user has approved the authorization request.',
+    inputSchema: {
+      request_id: z.string()
+        .describe('The tokenRequestId returned by initiate_authorization'),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
   },
   async ({ request_id }) => {
-    const result = await (client as CorporateClient).checkAuthorization(request_id);
+    const result = await corporateClient.checkAuthorization(request_id);
     return {
       content: [{
         type: 'text',
         text: `Status: ${result.status}`,
+      }],
+    };
+  }
+);
+```
+
+> **Note:** This uses `GET /personal/auth/request` with `X-Request-Id: {request_id}` as a header. The path is **always** `/personal/auth/request` — the `requestId` is NOT a path parameter.
+
+#### Tool: `get_corp_settings` (`src/tools/corporate-settings.ts`)
+
+```typescript
+server.registerTool(
+  'get_corp_settings',
+  {
+    title: 'Get Corporate Settings',
+    description: '[Corporate API only] Get corporate application settings including registered public key, app name, permissions, and webhook URL.',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async () => {
+    const settings = await corporateClient.getCorpSettings();
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(settings, null, 2),
+      }],
+    };
+  }
+);
+```
+
+#### Tool: `set_corp_webhook`
+
+```typescript
+server.registerTool(
+  'set_corp_webhook',
+  {
+    title: 'Set Corporate Webhook',
+    description: '[Corporate API only] Set or update the webhook URL for the corporate application.',
+    inputSchema: {
+      url: z.string().url()
+        .describe('Publicly accessible HTTPS URL to receive events'),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ url }) => {
+    await corporateClient.setCorpWebhook(url);
+    return {
+      content: [{
+        type: 'text',
+        text: `Corporate webhook set to: ${url}`,
       }],
     };
   }
@@ -1207,7 +1587,7 @@ Full README structure for v1.0.0:
 4. Quick start (2–3 commands)
 5. Authentication section: Personal vs Corporate, how to get each
 6. Claude Desktop config (copy-paste)
-7. Full tools table (8 tools)
+7. Full tools table (8 personal + 4 corporate = 12 tools)
 8. Corporate API section (link to docs/CORPORATE_API.md)
 9. Rate limits note
 10. Contributing
@@ -1231,13 +1611,14 @@ Submit to all registries after v1.0.0:
 ### Phase 4 Checklist
 
 - [ ] Email sent to api@monobank.ua with pub.key
-- [ ] `src/client/signing.ts` — signRequest(), loadPrivateKey()
-- [ ] `src/client/corporate.ts` — CorporateClient class
-- [ ] `src/server.ts` — auth mode detection, createClient()
+- [ ] `src/client/signing.ts` — signRequest() with variable `secondIngredient`, loadPrivateKey()
+- [ ] `src/client/corporate.ts` — CorporateClient class (userHeaders vs corpHeaders)
+- [ ] `src/server.ts` — auth mode detection with AppContext, conditional tool registration
 - [ ] `src/tools/corporate-auth.ts` — initiate_authorization, check_authorization
+- [ ] `src/tools/corporate-settings.ts` — get_corp_settings, set_corp_webhook
 - [ ] Corporate mode: cache TTL reduced to 5s
-- [ ] `tests/client/signing.test.ts` — verify signature format matches spec
-- [ ] `tests/client/corporate.test.ts` — happy path, auth error
+- [ ] `tests/client/signing.test.ts` — verify secondIngredient variations, signature format
+- [ ] `tests/client/corporate.test.ts` — per-user vs corp-level endpoints, auth flow
 - [ ] `docs/CORPORATE_API.md` — setup guide
 - [ ] `*.key` in `.gitignore`
 - [ ] Full README v1.0.0
@@ -1259,7 +1640,32 @@ Submit to all registries after v1.0.0:
 | **1** | Foundation + Personal API | Working MCP, 3 tools, published to npm | 2–3 days |
 | **2** | Robustness + Testing | Retry/backoff, tests, Docker, listed on Glama | 2 days |
 | **3** | Webhooks + Advanced tools | 8 tools total, v0.3.0 | 1–2 days |
-| **4** | Corporate API | ECDSA auth, multi-user, v1.0.0 | 3–4 days + approval wait |
+| **4** | Corporate API | ECDSA auth, multi-user, 12 tools total, v1.0.0 | 3–4 days + approval wait |
 
 **Total active work:** ~10 days  
 **Blockers:** Monobank Corporate API approval (Phase 4 only — Phase 1–3 can proceed without it)
+
+---
+
+## Appendix: Verified API Endpoints (as of 2026-05)
+
+### Personal API — All endpoints confirmed via live API and community SDKs
+
+| Method | Path | Auth | Notes |
+|--------|------|------|-------|
+| GET | `/bank/currency` | None | Updates every 5 min, ~122 currency pairs |
+| GET | `/personal/client-info` | `X-Token` | 1 req/60s rate limit |
+| GET | `/personal/statement/{account}/{from}/{to?}` | `X-Token` | `to` optional, max 31 days, 1 req/60s |
+| POST | `/personal/webhook` | `X-Token` | Body: `{ "webHookUrl": "..." }`, empty string = delete |
+
+### Corporate API — Verified via community Go/Haskell/PHP SDKs and unofficial docs
+
+| Method | Path | Auth Headers | Signing 2nd Ingredient |
+|--------|------|-------------|----------------------|
+| POST | `/personal/auth/request` | `X-Key-Id`, `X-Time`, `X-Sign`, `X-Callback`, `X-Permissions` | permissions string |
+| GET | `/personal/auth/request` | `X-Key-Id`, `X-Time`, `X-Sign`, `X-Request-Id` | requestId |
+| GET | `/personal/client-info` | `X-Key-Id`, `X-Time`, `X-Sign`, `X-Request-Id` | requestId |
+| GET | `/personal/statement/{account}/{from}/{to?}` | `X-Key-Id`, `X-Time`, `X-Sign`, `X-Request-Id` | requestId |
+| GET | `/personal/corp/settings` | `X-Key-Id`, `X-Time`, `X-Sign` | `""` (empty) |
+| POST | `/personal/corp/webhook` | `X-Key-Id`, `X-Time`, `X-Sign` | `""` (empty) |
+| GET | `/bank/currency` | None | N/A (public) |
