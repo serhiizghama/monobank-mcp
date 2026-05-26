@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/serhiizghama/monobank-mcp/actions/workflows/ci.yml"><img src="https://github.com/serhiizghama/monobank-mcp/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://www.npmjs.com/package/monobank-mcp"><img src="https://img.shields.io/npm/v/monobank-mcp" alt="npm version" /></a>
   <a href="https://github.com/serhiizghama/monobank-mcp"><img src="https://img.shields.io/github/stars/serhiizghama/monobank-mcp?style=flat" alt="GitHub stars" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
