@@ -3,6 +3,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { TtlCache } from './cache/ttl-cache.js';
 import { CorporateClient } from './client/corporate.js';
 import { PersonalClient } from './client/personal.js';
+import { apiFetch } from './client/base.js';
+import { withRetry } from './client/retry.js';
 import { loadPrivateKey } from './client/signing.js';
 import { registerAccountTools } from './tools/account.js';
 import { registerCorporateAuthTools } from './tools/corporate-auth.js';
@@ -62,7 +64,7 @@ export function createServer(): McpServer {
   return server;
 }
 
-function registerResources(server: McpServer, mode: AuthMode, cache: TtlCache): void {
+function registerResources(server: McpServer, _mode: AuthMode, cache: TtlCache): void {
   server.registerResource(
     'exchange-rates',
     'monobank://exchange-rates',
@@ -77,8 +79,7 @@ function registerResources(server: McpServer, mode: AuthMode, cache: TtlCache): 
         return { contents: [{ uri: uri.href, mimeType: 'application/json', text: cached }] };
       }
 
-      const { apiFetch } = await import('./client/base.js');
-      const rates = await apiFetch<unknown[]>('/bank/currency');
+      const rates = await withRetry(() => apiFetch<unknown[]>('/bank/currency'));
       const text = JSON.stringify(rates, null, 2);
       cache.set(cacheKey, text, 300);
       return { contents: [{ uri: uri.href, mimeType: 'application/json', text }] };
