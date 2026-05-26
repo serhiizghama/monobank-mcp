@@ -1,7 +1,7 @@
 {
   "name": "monobank-mcp",
-  "version": "0.1.0",
-  "description": "MCP server for Monobank Open API — accounts, statements, exchange rates",
+  "version": "0.3.0",
+  "description": "MCP server for Monobank Open API — accounts, statements, exchange rates, jars, webhooks",
   "type": "module",
   "bin": {
     "monobank-mcp": "./dist/index.js"

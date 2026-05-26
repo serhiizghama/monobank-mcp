@@ -91,6 +91,49 @@ export function registerStatementTools(
       }
     },
   );
+
+  server.registerTool(
+    'get_recent_transactions',
+    {
+      title: 'Get Recent Transactions',
+      description:
+        'Get the most recent transactions from an account. Use this to check for new activity, monitor spending, or find a specific payment.',
+      inputSchema: {
+        account_id: z.string().optional().default('0')
+          .describe("Account ID. Use '0' for default card. Get IDs via get_client_info"),
+        minutes: z.number().int().min(1).max(43200).optional().default(60)
+          .describe('How many minutes back to look (default: 60, max: 43200 = 30 days)'),
+        limit: z.number().int().min(1).max(100).optional().default(20)
+          .describe('Max transactions to return (default: 20)'),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ account_id, minutes, limit }) => {
+      try {
+        const to = Math.floor(Date.now() / 1000);
+        const from = to - minutes * 60;
+
+        const items = await client.getStatement(account_id, from, to);
+        const formatted = formatStatementItems(items).slice(0, limit);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: formatted.length === 0
+              ? 'No transactions in this period.'
+              : JSON.stringify(formatted, null, 2),
+          }],
+        };
+      } catch (err) {
+        return handleToolError(err);
+      }
+    },
+  );
 }
 
 function parseTimestamp(value: string): number {
