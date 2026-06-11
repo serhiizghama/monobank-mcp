@@ -22,6 +22,14 @@
     "ai-agent"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/serhiizghama/monobank-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/serhiizghama/monobank-mcp/issues"
+  },
+  "homepage": "https://github.com/serhiizghama/monobank-mcp#readme",
   "engines": {
     "node": ">=20"
   },
